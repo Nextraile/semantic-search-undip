@@ -2,10 +2,11 @@
 
 ## What this repo is
 
-One small service: FastAPI semantic search over harvested Universitas Diponegoro (Undip) eprints. Flat layout, no packages, no tests, no CI, no lockfile. Python 3.11.
+One small service: FastAPI semantic search over harvested Universitas Diponegoro (Undip) eprints. Flat layout, pytest tests, no CI, no lockfile. Python 3.11.
 
-- `backend.py` — hardened version: async endpoint, embedding/query offloaded via `run_in_threadpool`, explicit `RuntimeError` at startup when the Chroma collection is missing.
-- `backend_example.py` — original sync version. **The Dockerfile copies and serves this file** (`CMD uvicorn backend_example:app`), not `backend.py`. Editing `backend.py` changes nothing in the container until the Dockerfile is updated too. Keep the two in sync on the API contract and constants.
+- `backend.py` — served API: async search endpoint, embedding/query/summary offloaded via `run_in_threadpool`, explicit `RuntimeError` at startup when the Chroma collection is missing.
+- `search_routes.py` and `search_schemas.py` — search routes, response/request models, and LLM fallback flow used by `backend.py`.
+- `backend_example.py` — original sync version, not used by the Dockerfile.
 - `data_harvesting.ipynb` — the only data ingestion path. Not run by the app, not in the Docker image (`.dockerignore` excludes `*.ipynb`).
 
 ## Data prerequisites (the #1 startup failure)
@@ -23,17 +24,18 @@ One small service: FastAPI semantic search over harvested Universitas Diponegoro
 ```bash
 pip install -r requirements.txt
 uvicorn backend:app --reload --port 8000   # local dev; run from repo root
-docker compose up --build                  # serves backend_example.py on :8000
+docker compose up --build                  # serves backend.py on :8000
 ```
 
 - Run uvicorn from the repo root: `DB_PATH = "./eprints_vector_db"` is relative to the CWD.
-- No test runner, linter, formatter, or typechecker is configured. Do not assume `pytest` / `npm test` / `ruff` exist; verify before adding them.
+- Focused API tests: `python -m pytest -q test.py test_search.py` (install `requirements-dev.txt` first if needed). No linter, formatter, or typechecker is configured.
 - `requirements.txt` is range-pinned (`chromadb>=1.5,<2`, `sentence-transformers>=6,<7`); code depends on Chroma 1.x APIs. `docker-compose.yml` bind-mounts `./eprints_vector_db`, so the host DB is what the container reads.
 
 ## API contract
 
-- Single endpoint: `POST /search`. Request `{query: str, min_length=1, max_threshold: float = 0.5, ge=0, le=2}`.
-- Response wrapper `{query, max_threshold, count, results}`; each result has **Indonesian keys**: `peringkat`, `skor`, `judul`, `penulis`, `deskripsi`, `url`, `date`.
-- `skor` is a cosine **distance** (0 = identical), not a similarity, despite the name. Rows with `distance > max_threshold` are dropped and `peringkat` is a dense rank computed after filtering (so it can differ from the raw Chroma index).
-- Always fetches `N_RESULTS = 100` then filters in Python. There is no pagination or `offset`.
-- Result construction indexes Chroma metadata directly (`metadata["title"]`, `["creators"]`, `["url"]`, `["description"]`, `["date"]`) — a missing metadata key raises `KeyError` per request. Metadata shape is owned by the ingestion notebook; change both together.
+- `POST /search` accepts `{query: str, max_threshold: float = 0.5}`. The query is stripped and must not be empty; threshold is between 0 and 2.
+- Response wrapper includes `{query, max_threshold, count, results, status, ringkasan, arahan}`. `status` is `full`, `list_only`, or `no_results`; each result has **Indonesian keys**: `peringkat`, `skor`, `judul`, `penulis`, `deskripsi`, `url`, `date`.
+- `skor` is a cosine **distance** (0 = identical), not a similarity, despite the name. Rows with `distance > max_threshold` are dropped and `peringkat` is a dense rank computed after filtering. Invalid metadata and duplicate URLs are skipped.
+- Always fetches `N_RESULTS = 100` then filters in Python. The top `SUMMARY_TOP_K = 5` results are passed to the summary function. The default LLM function raises `LLMError`, returning `list_only`; no matches return `no_results` with `arahan`.
+- `GET /health` reports the collection document count; `GET /metrics` reports search request count and last-search latency. There is no pagination or `offset`.
+- Metadata shape is owned by the ingestion notebook; change both together.

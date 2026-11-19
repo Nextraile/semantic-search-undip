@@ -6,6 +6,12 @@ services:
     volumes:
       - ./eprints_vector_db:/app/eprints_vector_db
       - model_cache:/model-cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     restart: unless-stopped
 
 volumes:
